@@ -1,0 +1,497 @@
+//Circle.cs--------------------------------------
+
+using System.ComponentModel;
+using System.Xml.Serialization;
+
+namespace FourierPlotter
+{
+    public class Circle : INotifyPropertyChanged
+    {
+        private double _radius;
+        private double _frequency;
+
+        [XmlElement("radius")]
+        public double Radius
+        {
+            get { return _radius; }
+            set { _radius = value; OnPropertyChanged("Radius"); }
+        }
+
+        [XmlElement("frequency")]
+        public double Frequency
+        {
+            get { return _frequency; }
+            set { _frequency = value; OnPropertyChanged("Frequency"); }
+        }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        private void OnPropertyChanged(string propertyName)
+        {
+            if (PropertyChanged != null)
+                PropertyChanged(this, new PropertyChangedEventArgs(propertyName));
+        }
+    }
+
+    [XmlRoot("CircleList")]
+    public class CircleListWrapper
+    {
+        [XmlArray("CircleList")]
+        [XmlArrayItem("Circle")]
+        public System.Collections.Generic.List<Circle> CircleList { get; set; }
+            = new System.Collections.Generic.List<Circle>();
+    }
+}
+
+//MainWindow.xaml-----------------------------------
+
+<Window x:Class="FourierPlotter.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Fourier Plotter"
+        WindowState="Maximized"
+        ResizeMode="NoResize">
+    <DockPanel>
+
+        <Menu DockPanel.Dock="Top">
+            <MenuItem Header="_File">
+                <MenuItem Header="_New"  Click="New_Click"/>
+                <MenuItem Header="_Open" Click="Open_Click"/>
+                <MenuItem Header="_Save" Click="Save_Click"/>
+            </MenuItem>
+            <MenuItem Header="E_xit" Click="Exit_Click"/>
+            <MenuItem Header="_Options">
+                <MenuItem Header="_Draw circles" IsCheckable="True"
+                          x:Name="MenuDrawCircles"
+                          Checked="DrawOption_Changed"
+                          Unchecked="DrawOption_Changed"/>
+                <MenuItem Header="_Draw lines" IsCheckable="True"
+                          x:Name="MenuDrawLines"
+                          Checked="DrawOption_Changed"
+                          Unchecked="DrawOption_Changed"/>
+            </MenuItem>
+        </Menu>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="4*"/>
+                <ColumnDefinition Width="1*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="17*"/>
+                <RowDefinition Height="3*"/>
+            </Grid.RowDefinitions>
+
+            <DockPanel Grid.Row="0" Grid.Column="0" Margin="4">
+                <Label DockPanel.Dock="Top" Content="Plotter" FontWeight="Bold"/>
+                <Canvas x:Name="PlotterCanvas" Background="White" ClipToBounds="True"/>
+            </DockPanel>
+
+            <DockPanel Grid.Row="0" Grid.Column="1" Margin="4">
+                <Label DockPanel.Dock="Top" Content="Circles" FontWeight="Bold"/>
+                <DataGrid x:Name="CirclesGrid"
+                          AutoGenerateColumns="False"
+                          CanUserAddRows="True"
+                          CanUserDeleteRows="True"
+                          ItemsSource="{Binding Circles}">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Radius"
+                            Binding="{Binding Radius, UpdateSourceTrigger=LostFocus}"
+                            Width="*"/>
+                        <DataGridTextColumn Header="Frequency"
+                            Binding="{Binding Frequency, UpdateSourceTrigger=LostFocus}"
+                            Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </DockPanel>
+
+            <ProgressBar x:Name="ProgressBar"
+                         Grid.Row="1" Grid.Column="0"
+                         Minimum="0" Maximum="10"
+                         Margin="6"/>
+
+            <DockPanel Grid.Row="1" Grid.Column="1" Margin="4">
+                <Label DockPanel.Dock="Top" Content="Controls" FontWeight="Bold"/>
+                <UniformGrid Rows="1" VerticalAlignment="Center">
+                    <Button Content="Start" Click="Start_Click" Margin="2"/>
+                    <Button Content="Pause" Click="Pause_Click" Margin="2"/>
+                    <Button Content="Reset" Click="Reset_Click" Margin="2"/>
+                </UniformGrid>
+            </DockPanel>
+
+        </Grid>
+    </DockPanel>
+</Window>
+
+//MainWindow.xaml.cs--------------------------------
+
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+using System.Windows.Shapes;
+using System.Windows.Threading;
+using System.Xml.Serialization;
+using Microsoft.Win32;
+
+namespace FourierPlotter
+{
+    public partial class MainWindow : Window
+    {
+        public ObservableCollection<Circle> Circles = new ObservableCollection<Circle>();
+
+        private DispatcherTimer timer = new DispatcherTimer();
+        private Stopwatch stopwatch = new Stopwatch();
+
+        private double pausedTime = 0.0;
+        private bool isRunning = false;
+        private bool isPaused = false;
+
+        private const double DURATION = 10.0;
+
+        private List<Point> penPath = new List<Point>();
+        private double lastT = 0.0;
+
+        public MainWindow()
+        {
+            InitializeComponent();
+            DataContext = this;
+
+            timer.Interval = TimeSpan.FromMilliseconds(16);
+            timer.Tick += Timer_Tick;
+
+            Circles.CollectionChanged += Circles_Changed;
+        }
+
+        private void Circles_Changed(object sender,
+            System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+        {
+            if (e.NewItems != null)
+            {
+                foreach (Circle c in e.NewItems)
+                    c.PropertyChanged += (s, args) => RedrawCanvas(lastT);
+            }
+            RedrawCanvas(lastT);
+        }
+
+        private double GetElapsed()
+        {
+            if (isRunning)
+                return pausedTime + stopwatch.Elapsed.TotalSeconds;
+            else
+                return pausedTime;
+        }
+
+        private void Timer_Tick(object sender, EventArgs e)
+        {
+            double t = GetElapsed();
+
+            if (t >= DURATION)
+            {
+                t = DURATION;
+                stopwatch.Stop();
+                timer.Stop();
+                isRunning = false;
+                isPaused = false;
+            }
+
+            lastT = t;
+            ProgressBar.Value = t;
+
+            if (Circles.Count > 0)
+            {
+                Point pen = GetPenPosition(t);
+                penPath.Add(pen);
+            }
+
+            RedrawCanvas(t);
+        }
+
+        private Point GetPenPosition(double t)
+        {
+            double cx = PlotterCanvas.ActualWidth  / 2.0;
+            double cy = PlotterCanvas.ActualHeight / 2.0;
+
+            double x = cx;
+            double y = cy;
+
+            foreach (Circle c in Circles)
+            {
+                double angle = 2.0 * Math.PI * c.Frequency * t / DURATION;
+                x += c.Radius * Math.Cos(angle);
+                y += c.Radius * Math.Sin(angle);
+            }
+
+            return new Point(x, y);
+        }
+
+        private void RedrawCanvas(double t)
+        {
+            PlotterCanvas.Children.Clear();
+
+            if (Circles.Count == 0)
+                return;
+
+            double cx = PlotterCanvas.ActualWidth  / 2.0;
+            double cy = PlotterCanvas.ActualHeight / 2.0;
+
+            if (cx <= 0 || cy <= 0)
+                return;
+
+            List<Point> centers = new List<Point>();
+            List<Point> tips    = new List<Point>();
+
+            double currentX = cx;
+            double currentY = cy;
+
+            foreach (Circle c in Circles)
+            {
+                centers.Add(new Point(currentX, currentY));
+
+                double angle = 2.0 * Math.PI * c.Frequency * t / DURATION;
+                double tipX = currentX + c.Radius * Math.Cos(angle);
+                double tipY = currentY + c.Radius * Math.Sin(angle);
+
+                tips.Add(new Point(tipX, tipY));
+
+                currentX = tipX;
+                currentY = tipY;
+            }
+
+            Point penPos = new Point(currentX, currentY);
+
+            if (penPath.Count >= 2)
+            {
+                Polyline trace = new Polyline();
+                trace.Stroke = Brushes.Black;
+                trace.StrokeThickness = 1.5;
+                foreach (Point p in penPath)
+                    trace.Points.Add(p);
+                PlotterCanvas.Children.Add(trace);
+            }
+
+            if (MenuDrawCircles.IsChecked)
+            {
+                for (int i = 0; i < Circles.Count; i++)
+                {
+                    double r = Math.Abs(Circles[i].Radius);
+
+                    Ellipse el = new Ellipse();
+                    el.Width = r * 2;
+                    el.Height = r * 2;
+                    el.Stroke = Brushes.CornflowerBlue;
+                    el.StrokeThickness = 1;
+                    el.Fill = Brushes.Transparent;
+
+                    Canvas.SetLeft(el, centers[i].X - r);
+                    Canvas.SetTop (el, centers[i].Y - r);
+                    PlotterCanvas.Children.Add(el);
+                }
+            }
+
+            if (MenuDrawLines.IsChecked)
+            {
+                for (int i = 0; i < Circles.Count; i++)
+                {
+                    Line line = new Line();
+                    line.X1 = centers[i].X;
+                    line.Y1 = centers[i].Y;
+                    line.X2 = tips[i].X;
+                    line.Y2 = tips[i].Y;
+                    line.Stroke = Brushes.Gray;
+                    line.StrokeThickness = 1;
+                    PlotterCanvas.Children.Add(line);
+                }
+            }
+
+            double dotR = 5;
+            Ellipse dot = new Ellipse();
+            dot.Width  = dotR * 2;
+            dot.Height = dotR * 2;
+            dot.Fill   = Brushes.Red;
+            Canvas.SetLeft(dot, penPos.X - dotR);
+            Canvas.SetTop (dot, penPos.Y - dotR);
+            PlotterCanvas.Children.Add(dot);
+        }
+
+        private void Start_Click(object sender, RoutedEventArgs e)
+        {
+            if (isRunning)
+                return;
+
+            if (isPaused)
+            {
+                isPaused = false;
+                isRunning = true;
+                stopwatch.Restart();
+                timer.Start();
+            }
+            else
+            {
+                penPath.Clear();
+                PlotterCanvas.Children.Clear();
+                pausedTime = 0.0;
+                lastT = 0.0;
+                ProgressBar.Value = 0;
+                isRunning = true;
+                stopwatch.Restart();
+                timer.Start();
+            }
+        }
+
+        private void Pause_Click(object sender, RoutedEventArgs e)
+        {
+            if (!isRunning)
+                return;
+
+            pausedTime = GetElapsed();
+            stopwatch.Stop();
+            timer.Stop();
+            isRunning = false;
+            isPaused = true;
+        }
+
+        private void Reset_Click(object sender, RoutedEventArgs e)
+        {
+            timer.Stop();
+            stopwatch.Stop();
+            isRunning = false;
+            isPaused = false;
+            pausedTime = 0.0;
+            lastT = 0.0;
+            ProgressBar.Value = 0;
+            penPath.Clear();
+            PlotterCanvas.Children.Clear();
+        }
+
+        private void New_Click(object sender, RoutedEventArgs e)
+        {
+            Reset_Click(sender, e);
+            Circles.Clear();
+        }
+
+        private void Open_Click(object sender, RoutedEventArgs e)
+        {
+            OpenFileDialog dialog = new OpenFileDialog();
+            dialog.Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*";
+
+            if (dialog.ShowDialog() != true)
+                return;
+
+            try
+            {
+                XmlSerializer xs = new XmlSerializer(typeof(CircleListWrapper));
+                using (FileStream fs = new FileStream(dialog.FileName, FileMode.Open))
+                {
+                    CircleListWrapper wrapper = (CircleListWrapper)xs.Deserialize(fs);
+                    Circles.Clear();
+                    foreach (Circle c in wrapper.CircleList)
+                        Circles.Add(c);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Failed to open file:\n" + ex.Message,
+                    "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void Save_Click(object sender, RoutedEventArgs e)
+        {
+            SaveFileDialog dialog = new SaveFileDialog();
+            dialog.Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*";
+            dialog.DefaultExt = "xml";
+
+            if (dialog.ShowDialog() != true)
+                return;
+
+            try
+            {
+                CircleListWrapper wrapper = new CircleListWrapper();
+                foreach (Circle c in Circles)
+                    wrapper.CircleList.Add(c);
+
+                XmlSerializer xs = new XmlSerializer(typeof(CircleListWrapper));
+                using (FileStream fs = new FileStream(dialog.FileName, FileMode.Create))
+                    xs.Serialize(fs, wrapper);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Failed to save file:\n" + ex.Message,
+                    "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void Exit_Click(object sender, RoutedEventArgs e)
+        {
+            MessageBoxResult result = MessageBox.Show(
+                "Are you sure you want to exit?",
+                "Exit",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+
+            if (result == MessageBoxResult.Yes)
+                Application.Current.Shutdown();
+        }
+
+        private void DrawOption_Changed(object sender, RoutedEventArgs e)
+        {
+            RedrawCanvas(lastT);
+        }
+    }
+}
+
+///N0tes
+
+WPF Fourier plotter - things to remember
+
+= Timer stuff =
+DispatcherTimer for UI updates, NOT System.Timers.Timer (will crash)
+timer.Tick += Timer_Tick;  and  timer.Interval = TimeSpan.FromMilliseconds(16);
+Stopwatch from System.Diagnostics - just .Restart() and .Elapsed.TotalSeconds
+pause = save elapsed, stop both timer and stopwatch, on resume just Restart() stopwatch
+
+Canvas drawing:
+PlotterCanvas.Children.Clear(); every frame then redraw everything
+Ellipse position is TOP-LEFT corner not center!! so always do Canvas.SetLeft(el, x - r);
+Line is just X1 Y1 X2 Y2, stroke, strokethickness
+Polyline - add points with trace.Points.Add(p) in a loop, dont forget stroke
+
+** angle formula **
+angle = 2 * PI * frequency * t / DURATION
+positive freq = clockwise (y axis goes DOWN in wpf!!)
+chain: start from center, each circle adds to previous tip
+
+BINDING
+DataContext = this in constructor
+ObservableCollection not List (otherwise datagrid wont update)
+INotifyPropertyChanged on Circle, call OnPropertyChanged("Radius") in setter
+datagrid: ItemsSource="{Binding Circles}", UpdateSourceTrigger=LostFocus on columns
+
+xml serialization!!
+XmlSerializer xs = new XmlSerializer(typeof(CircleListWrapper));
+need wrapper class because cant serialize ObservableCollection directly
+[XmlRoot("CircleList")] on wrapper, [XmlArray("CircleList")] + [XmlArrayItem("Circle")] on the list inside
+[XmlElement("radius")] on each property (lowercase to match the file!!)
+always wrap in try/catch, show MessageBox on fail
+
+layout ratios:
+columns: 4* and 1* (80/20)
+rows: 17* and 3* (85/15)
+WindowState="Maximized" ResizeMode="NoResize"
+
+~ menu shortcuts ~
+underscore before letter: Header="_File" gives ALT+F
+IsCheckable="True" for toggles (draw circles, draw lines)
+check with if (MenuDrawCircles.IsChecked)
+
+things that will bite you!!
+canvas size is 0 before layout pass - guard with if (cx <= 0) return;
+Math.Abs(radius) when drawing ellipse radius (negative freq = counter clockwise, radius still positive)
+CanUserAddRows="True" CanUserDeleteRows="True" on datagrid or user cant edit
+exit dialog: MessageBoxButton.YesNo, check if(result == MessageBoxResult.Yes)
+
